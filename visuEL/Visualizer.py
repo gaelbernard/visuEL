@@ -73,7 +73,6 @@ class Vis:
         width = self.width_in_block * self.square_s
 
         d = draw.Drawing(width, height, origin=(0,0), displayInline=False)
-        print (self.activities_df)
         for row, trace in enumerate(sampling):
             for col, activity in enumerate(trace):
                 top = height - ((row*self.square_s) + (row*self.padding))
