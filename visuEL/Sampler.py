@@ -1,94 +1,108 @@
 import math
 import numpy as np
+np.seterr(divide='ignore', invalid='ignore')
 import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import TruncatedSVD
-import faiss
 from py2opt.routefinder import RouteFinder
 import random2
 from itertools import combinations
 import editdistance
 import os
 import sys
+from sklearn.neighbors import NearestNeighbors
 
 class CminSampler:
-    def __init__(self, variants, p=0):
+    def __init__(self, seqs, p=0, heuristic_presampling=10000, tsp_sort=True, random_seed=1):
         """
-        Parameters
-        ----------
-        variants : pd.Series
-            variants is a pd.Series where index=variant and value=count
-        p : int
-            Number of samples to return. If set to zero, it will automatically choose the size using self.auto_size()
+        Reduce the size of an event logs, while making sure that the selected traces are representatives
+        :param seqs: list of list representing the event logs (e.g., [[1,2],[1,2,3],[1,2]]
+        :param p: Size of the event logs once sampled. If set to 1, the size is automatically choosen as a function of the original size
+        :param heuristic_presampling: Apply a random sampling (proportional to variants' size) to make the process faster.
+        :param tsp_sort: If set to true: Sort the sequence by similarity using a TSP algorithm
+        :param random_seed: Given the same seed and identical event logs, make sure the sampling, forces the same output
         """
-        self.variants = variants
+        self.seqs = seqs
+        self.variants = pd.Series(self.seqs).value_counts()
 
-        if p<1 or p>variants.shape[0]:
+        if p<1 or p>self.variants.shape[0]:
             p = self.auto_size()
+
         self.p = p
+        self.heuristic_presampling = heuristic_presampling
+        self.tsp_sort = tsp_sort
+        self.random_seed = random_seed
 
-        self.multiplicity = variants.values
-        self.variant_seq = variants.index.tolist()
+        self.multiplicity = self.variants.values
+        self.variant_seq = self.variants.index.tolist()
 
-        # capacity it the number of traces assigned to each rep'
+        # n. traces assigned to each rep'
         self.capacity = math.floor(self.multiplicity.sum()/self.p)
 
-        # Expected occurrence reduction reduces the number of operations needed (see paper)
-        self.eo_counts = np.floor(((self.multiplicity / self.multiplicity.sum())) * self.p)
+        # Expected Occurrence Reduction reduces the number of operations needed (see paper)
+        ratio = self.multiplicity.sum()/self.p
+        count = self.multiplicity / ratio
+        self.eo_counts = np.floor(count) # Add frequently appearing variants
+        self.multiplicity = ((count - self.eo_counts) * ratio).round(0).astype(int) # Update the multiplicity
 
     def auto_size(self):
         """
         Define p based on the number of traces
         """
-        return int(round(math.log(float(self.variants.sum()),1.5),0))
+        return max(int(round(math.log(float(self.variants.sum()),1.5),0)),1)
 
-    def sample(self, tsp_sort=True):
+    def sample(self):
         """
         Select the p most representative traces
-        -------
-        list
-            a list (size p) of list of the most representative traces
         """
+        if len(self.seqs) == 1:
+            return self.seqs
         sampler = self.samplingWithEucl()
         seqs = [y for i, x in enumerate(sampler) if x > 0 for y in [self.variant_seq[i]]*int(x)]
-        if tsp_sort:
+
+        if self.tsp_sort and sampler[sampler>0].shape[0]>2:
             sys.stdout = open(os.devnull, 'w')
             seqs = self.tsp_sorting(seqs)
             sys.stdout = sys.__stdout__
         return seqs
 
-    def samplingWithEucl(self, max_seq=10000):
-        """ Run the sampling algorithm in the Euclidean space
-
-        Parameters
-        ----------
-        max_seq : int
-            Heuristic to speed-up the sampling. It will randomly pick {max_seq} traces
+    def samplingWithEucl(self):
         """
+        Run the sampling algorithm in the Euclidean space
+        """
+
         data = self.buildSignature()
         data = data.repeat(self.multiplicity, axis=0)
 
         original_seq_index = np.arange(self.multiplicity.shape[0]).repeat(self.multiplicity)
         not_assigned = np.ones(data.shape[0]).astype(bool)
 
-        if data.shape[0] > max_seq:
-            np.random.seed(0)
-            r = np.random.choice(not_assigned.shape[0], not_assigned.shape[0]-max_seq, replace=False)
-            not_assigned[r] = False
-            self.capacity = math.floor(max_seq/self.p)
+        if self.heuristic_presampling:
+            if data.shape[0] > self.heuristic_presampling:
+                np.random.seed(self.random_seed)
+                r = np.random.choice(not_assigned.shape[0], not_assigned.shape[0] - self.heuristic_presampling, replace=False)
+                not_assigned[r] = False
+                self.capacity = math.floor(self.heuristic_presampling / self.p)
 
         output_count = []
         while len(output_count) != self.p - self.eo_counts.sum():
             i_not_assigned = np.where(not_assigned==True)[0]
             ldata = data[not_assigned,:]
-            index = faiss.IndexFlatL2(ldata.shape[1])   # build the index
-            index.add(ldata)                            # add vectors to the index
-            D, I = index.search(ldata, self.capacity)
-            best_id = D.sum(axis=1).argmin()
-            closest_to_best = I[best_id,:]
 
-            output_count.append(original_seq_index[i_not_assigned[best_id]])
-            not_assigned[i_not_assigned[closest_to_best]] = False
+            if ldata.shape[0] > 2:
+                neigh = NearestNeighbors(n_neighbors=min(self.capacity,ldata.shape[0]))
+                neigh.fit(ldata)
+                D, I = neigh.kneighbors(ldata, return_distance=True)
+                best_id = D.sum(axis=1).argmin()
+                closest_to_best = I[best_id,:]
+
+                output_count.append(original_seq_index[i_not_assigned[best_id]])
+                not_assigned[i_not_assigned[closest_to_best]] = False
+            else:
+                # Add random seq (because choosing the most central from less than 3 obs is not possible)
+                missing = self.p - len(output_count) - self.eo_counts.sum()
+                np.random.seed(self.random_seed)
+                output_count.extend(np.random.choice(original_seq_index[i_not_assigned], int(missing)).tolist())
 
         return np.bincount(output_count, minlength=self.multiplicity.shape[0]) + self.eo_counts
 
@@ -97,13 +111,19 @@ class CminSampler:
         Extract features using ngrams and reduce dimensionality with SVD
         """
         cv = CountVectorizer(ngram_range=(1,2), tokenizer=lambda doc: doc, lowercase=False, max_features=1024)
-        data = cv.fit_transform([['$$START$$']+list(x)+['$$END$$'] for x in list(self.variants.keys())])
-        data = TruncatedSVD(min(64, int(data.shape[1]/2)+1), random_state=0).fit_transform(data).astype(np.float32)
+        seqs = [['$$START$$']+list([str(y) for y in x])+['$$END$$'] for x in list(self.variants.keys())]
+        data = cv.fit_transform(seqs)
+        data = TruncatedSVD(min(8, int(data.shape[1]/2)+1), random_state=0).fit_transform(data).astype(np.float32)
         return data
 
     def tsp_sorting(self, seqs):
+        '''
+        Order the sequence by similarty using a TSP algorithm
+        :param seqs: event logs represented as list of lists
+        :return:
+        '''
         dist_mat = self.buildDistanceMatrix(seqs)
-        random2.seed(1)
+        random2.seed(self.random_seed)
         route_finder = RouteFinder(dist_mat, None, iterations=5)
         best_distance, best_route = route_finder.solve()
 
@@ -122,6 +142,11 @@ class CminSampler:
 
 
     def buildDistanceMatrix(self, seq):
+        '''
+        Build distance matrix between sequences using the normalize edit distance
+        :param seq: event logs provided as list of list
+        :return: Matrix of size (len(seqs)^2)
+        '''
         m = np.zeros([len(seq), len(seq)])
         for x, y in combinations(range(0,len(seq)), 2):
             d = editdistance.eval(seq[x], seq[y]) / max([len(seq[x]), len(seq[y])])
