@@ -1,14 +1,17 @@
 import numpy as np
 import pandas as pd
+import copy
 from matplotlib import pyplot as plt
 from matplotlib.colors import rgb2hex
 import svgwrite
+from pm4py.objects.log.importer.xes import importer as xes_importer
 
 class Vis:
     padding = 5
     square_s = 50
+    margin_legend = 30
 
-    def __init__(self, seqs, max_n_color=6, legend=None, mapping_name=None, title=None, width_in_block=20):
+    def __init__(self, max_n_color=6, legend=None, mapping_name=None, title=None, width_in_block=20):
         """
         Produce SVG visualizations for event logs
         :param seqs: event logs represented as list of lists
@@ -33,23 +36,40 @@ class Vis:
                                 If a trace contains more than {width_in_block}, it will
                                 be truncated like [1,2,3,4,5,...,10] (with width_in_block=7)
         """
-        self.seqs = self.load_seqs(seqs)
+        self.seqs = None
         self.max_n_color = int(max_n_color)
         self.legend = legend
         self.mapping_name = mapping_name
         self.title = title
         self.width_in_block = width_in_block
+        self.svg = {}
+
+    def _load(self, seqs):
+        self.seqs = seqs
 
         if not self.legend:
             self.legend = self.extract_legend(self.seqs)
         else:
             self._add_missing_activity_to_legend()
 
-        self.svg = {}
         # We create three kind of SVGs
         for type in ['seq','legend','seqlegend']:
             self.svg[type] = self._build_svg(type)
 
+    def load_from_seq(self, seqs):
+        self._load([[str(y) for y in x] for x in seqs])
+
+    def load_from_xes(self, path):
+        log = xes_importer.apply(path)
+        self.load_from_pm4py(log)
+
+    def load_from_pm4py(self, log_object):
+        seq = [[e['concept:name'] for e in trace] for trace in log_object]
+        self.load_from_seq(seq)
+
+    def load_from_df(self, df, case_col, activity_col):
+        seq = df.groupby(case_col)[activity_col].agg(list).tolist()
+        self.load_from_seq(seq)
 
     def _add_missing_activity_to_legend(self):
         '''
@@ -68,9 +88,6 @@ class Vis:
             if k not in self.legend:
                 self.legend[k] = last_row
                 self.legend[k]['o_name'] = k
-
-    def load_seqs(self, seqs):
-        return [[str(y) for y in x] for x in seqs]
 
     def extract_legend(self, seqs):
         '''
@@ -126,24 +143,30 @@ class Vis:
         n = 0
         if type in ['seq','seqlegend']:
             n += len(self.seqs)   # For the sequence
-            n += 1              # For the number of cases at the top
         if type in ['legend','seqlegend']:
             # For the legend
-            n += min(self.max_n_color, len(self.legend)) + 2
+            u_name = {x['name'] for x in self.legend.values()}
+            n += len(u_name)
+        n += self.title is not None
 
         height = n*(self.padding+self.square_s)
+        if type == 'seqlegend':
+            height += self.margin_legend
+
         width = self.width_in_block * self.square_s
         font_size = self.square_s*0.7
 
 
         d = svgwrite.Drawing('test.svg', profile='tiny', size=(width, height))
+        d.add(d.rect((0, 0), (width, height), fill='#ffffff'))
 
         if type in ['seq','seqlegend']:
-            d.add(d.text(self.title,  insert=(5, 25), fill='black', font_size=font_size,))
+            if self.title is not None:
+                d.add(d.text(self.title,  insert=(0, 35), fill='black', font_size=font_size,))
 
             for row, trace in enumerate(self.seqs):
                 for col, activity in enumerate(trace):
-                    top = (((row+(self.title is not None))*self.square_s) + ((row)*self.padding+1))
+                    top = (((row+(self.title is not None))*self.square_s) + ((row)*self.padding))
                     if len(trace) > self.width_in_block:
                         if col == len(trace) - 2:
                             left = (self.width_in_block - 2)*self.square_s
@@ -162,11 +185,16 @@ class Vis:
                     d.add(d.rect((left, top), (self.square_s, self.square_s), fill=self.legend[activity]['color']))
 
         if type in ['legend','seqlegend']:
-            top = 1 if type == 'legend' else len(self.seqs) + 2
+            top = 0 if type == 'legend' else len(self.seqs)
+            top += self.title is not None
+
             for i, v in enumerate(self.legend.values()):
                 if v['ranking']>=self.max_n_color:
                     continue
                 t = (self.square_s + self.padding)*(v['ranking']+top)
+                if type == 'seqlegend':
+                    t += self.margin_legend
+
                 d.add(d.rect((0, t), (self.square_s*0.8, self.square_s*0.8), fill=v['color']))
                 d.add(d.text(v['name'],  insert=(self.square_s, t+(self.square_s*0.6)), fill='black', font_size=font_size,))
         d.viewbox(0, 0, width, height)
@@ -184,12 +212,12 @@ class Vis:
         """
         return self.svg[type].tostring()
 
-    def get_activities(self):
+    def get_legend(self):
         '''
         Return the legend, useful when we want to apply it to another visualizations.
         :return: dictionary
         '''
-        return self.legend
+        return copy.deepcopy(self.legend)
 
     def save_svg(self, type, path):
         '''

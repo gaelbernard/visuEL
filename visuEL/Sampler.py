@@ -11,9 +11,10 @@ import editdistance
 import os
 import sys
 from sklearn.neighbors import NearestNeighbors
+from pm4py.objects.log.importer.xes import importer as xes_importer
 
 class CminSampler:
-    def __init__(self, seqs, p=0, heuristic_presampling=10000, tsp_sort=True, random_seed=1):
+    def __init__(self, p=0, heuristic_presampling=10000, tsp_sort=True, random_seed=1):
         """
         Reduce the size of an event logs, while making sure that the selected traces are representatives
         :param seqs: list of list representing the event logs (e.g., [[1,2],[1,2,3],[1,2]]
@@ -22,19 +23,37 @@ class CminSampler:
         :param tsp_sort: If set to true: Sort the sequence by similarity using a TSP algorithm
         :param random_seed: Given the same seed and identical event logs, make sure the sampling, forces the same output
         """
-        self.seqs = seqs
-        self.variants = pd.Series(self.seqs).value_counts()
-
-        if p<1 or p>self.variants.shape[0]:
-            p = self.auto_size()
-
         self.p = p
         self.heuristic_presampling = heuristic_presampling
         self.tsp_sort = tsp_sort
         self.random_seed = random_seed
+        self.seqs, self.variants, self.multiplicity, self.capacity = [None]*4
 
+    def load_from_seq(self, seqs):
+        self._load([[str(y) for y in x] for x in seqs])
+
+    def load_from_xes(self, path):
+        log = xes_importer.apply(path)
+        self.load_from_pm4py(log)
+
+    def load_from_pm4py(self, log_object):
+        seq = [[e['concept:name'] for e in trace] for trace in log_object]
+        self.load_from_seq(seq)
+
+    def load_from_df(self, df, case_col, activity_col):
+        seq = df.groupby(case_col)[activity_col].agg(list).tolist()
+        self.load_from_seq(seq)
+
+    def _load(self, seqs):
+        self.seqs = seqs
+        self.variants = pd.Series(self.seqs).value_counts()
+
+        # If size is not reasonable or empty, we automatically choose the size
+        if self.p<1 or self.p>self.variants.shape[0] or not self.p:
+            self.p = self.auto_size()
+
+        # Count per variants
         self.multiplicity = self.variants.values
-        self.variant_seq = self.variants.index.tolist()
 
         # n. traces assigned to each rep'
         self.capacity = math.floor(self.multiplicity.sum()/self.p)
@@ -58,7 +77,7 @@ class CminSampler:
         if len(self.seqs) == 1:
             return self.seqs
         sampler = self.samplingWithEucl()
-        seqs = [y for i, x in enumerate(sampler) if x > 0 for y in [self.variant_seq[i]]*int(x)]
+        seqs = [y for i, x in enumerate(sampler) if x > 0 for y in [self.variants.index.tolist()[i]]*int(x)]
 
         if self.tsp_sort and sampler[sampler>0].shape[0]>2:
             sys.stdout = open(os.devnull, 'w')
