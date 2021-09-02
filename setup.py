@@ -2,7 +2,7 @@ from distutils.core import setup
 setup(
   name = 'visuEL',         # How you named your package folder (MyLib)
   packages = ['visuEL'],   # Chose the same as "name"
-  version = '0.28',      # Start with a small number and increase it with every change you make
+  version = '0.36',      # Start with a small number and increase it with every change you make
   license='MIT',        # Chose a license from here: https://help.github.com/articles/licensing-a-repository
   description = 'visuEL - VISualization of Event Logs: contains an event logs sampler and a visualizer so that thousands of traces from an event logs can be easily visualized using few representatives traces on a SVG',   # Give a short description about your library
   author = 'Gaël Bernard',                   # Type in your name

@@ -4,28 +4,21 @@ np.seterr(divide='ignore', invalid='ignore')
 import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import TruncatedSVD
-from py2opt.routefinder import RouteFinder
-import random2
-from itertools import combinations
-import editdistance
-import os
-import sys
+
 from sklearn.neighbors import NearestNeighbors
 from pm4py.objects.log.importer.xes import importer as xes_importer
 
 class CminSampler:
-    def __init__(self, p=0, heuristic_presampling=10000, tsp_sort=True, random_seed=1):
+    def __init__(self, p=0, heuristic_presampling=5000, random_seed=1):
         """
         Reduce the size of an event logs, while making sure that the selected traces are representatives
         :param seqs: list of list representing the event logs (e.g., [[1,2],[1,2,3],[1,2]]
         :param p: Size of the event logs once sampled. If set to 1, the size is automatically choosen as a function of the original size
         :param heuristic_presampling: Apply a random sampling (proportional to variants' size) to make the process faster.
-        :param tsp_sort: If set to true: Sort the sequence by similarity using a TSP algorithm
         :param random_seed: Given the same seed and identical event logs, make sure the sampling, forces the same output
         """
         self.p = p
         self.heuristic_presampling = heuristic_presampling
-        self.tsp_sort = tsp_sort
         self.random_seed = random_seed
         self.seqs, self.variants, self.multiplicity, self.capacity = [None]*4
 
@@ -68,7 +61,7 @@ class CminSampler:
         """
         Define p based on the number of traces
         """
-        return max(int(round(math.log(float(self.variants.sum()),1.5),0)),1)
+        return int(math.ceil(math.log(float(self.variants.sum()),1.5)))
 
     def sample(self):
         """
@@ -79,10 +72,6 @@ class CminSampler:
         sampler = self.samplingWithEucl()
         seqs = [y for i, x in enumerate(sampler) if x > 0 for y in [self.variants.index.tolist()[i]]*int(x)]
 
-        if self.tsp_sort and sampler[sampler>0].shape[0]>2:
-            sys.stdout = open(os.devnull, 'w')
-            seqs = self.tsp_sorting(seqs)
-            sys.stdout = sys.__stdout__
         return seqs
 
     def samplingWithEucl(self):
@@ -135,42 +124,4 @@ class CminSampler:
         data = TruncatedSVD(min(8, int(data.shape[1]/2)+1), random_state=0).fit_transform(data).astype(np.float32)
         return data
 
-    def tsp_sorting(self, seqs):
-        '''
-        Order the sequence by similarty using a TSP algorithm
-        :param seqs: event logs represented as list of lists
-        :return:
-        '''
-        dist_mat = self.buildDistanceMatrix(seqs)
-        random2.seed(self.random_seed)
-        route_finder = RouteFinder(dist_mat, None, iterations=5)
-        best_distance, best_route = route_finder.solve()
 
-        d = []
-        for i in range(len(best_route)):
-            current = best_route[i]
-            try:
-                next = best_route[i+1]
-            except:
-                next = best_route[0]
-            d.append(dist_mat[current][next])
-        cut = np.array(d).argmax()
-        best_route = best_route[cut+1:]+best_route[:cut+1]
-
-        return [seqs[int(x)] for x in best_route]
-
-
-    def buildDistanceMatrix(self, seq):
-        '''
-        Build distance matrix between sequences using the normalize edit distance
-        :param seq: event logs provided as list of list
-        :return: Matrix of size (len(seqs)^2)
-        '''
-        m = np.zeros([len(seq), len(seq)])
-        for x, y in combinations(range(0,len(seq)), 2):
-            d = editdistance.eval(seq[x], seq[y]) / max([len(seq[x]), len(seq[y])])
-            m[x,y] = d
-            m[y,x] = d
-        for x in range(len(seq)):
-            m[x,x] = 0
-        return m.astype(np.float64)

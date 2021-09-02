@@ -1,22 +1,24 @@
 import numpy as np
 import pandas as pd
 import copy
-from matplotlib import pyplot as plt
-from matplotlib.colors import rgb2hex
 import svgwrite
 from pm4py.objects.log.importer.xes import importer as xes_importer
-
+import sys, os
+from py2opt.routefinder import RouteFinder
+from itertools import combinations
+import editdistance
+import random2
 class Vis:
     padding = 5
     square_s = 50
     margin_legend = 30
+    colors = ['#000000','#3b156e','#8b2d80','#dc4b6a','#fc9f72']
+    other_color = '#eeeeee'
 
-    def __init__(self, max_n_color=6, legend=None, mapping_name=None, title=None, width_in_block=20):
+    def __init__(self, legend=None, mapping_name=None, title=None, width_in_block=20, tsp_sort=True, random_seed=1):
         """
         Produce SVG visualizations for event logs
         :param seqs: event logs represented as list of lists
-        :param max_n_color: maximum number of colors, only the {max_n_color}
-                            most appearing activities will have their own color
         :param legend:  For some analysis, it could be useful to have two event logs that
                         shares the same legend (e.g., when doing clustering); i.e.,
                         two visualizations will share the same colors and are hence comparable.
@@ -35,22 +37,29 @@ class Vis:
         :param width_in_block:  Max number of activities per sequence (default: 20).
                                 If a trace contains more than {width_in_block}, it will
                                 be truncated like [1,2,3,4,5,...,10] (with width_in_block=7)
+        :param tsp_sort: If set to true: Sort the sequence by similarity using a TSP algorithm
+        :param random_seed: Given the same seed and identical event logs, make sure the sampling, forces the same output
         """
         self.seqs = None
-        self.max_n_color = int(max_n_color)
+        self.max_n_color = len(self.colors)
         self.legend = legend
         self.mapping_name = mapping_name
         self.title = title
         self.width_in_block = width_in_block
+        self.tsp_sort = tsp_sort
+        self.random_seed = random_seed
         self.svg = {}
 
     def _load(self, seqs):
-        self.seqs = seqs
 
+        self.seqs = seqs
         if not self.legend:
-            self.legend = self.extract_legend(self.seqs)
+            self.legend = self.extract_legend(seqs)
         else:
             self._add_missing_activity_to_legend()
+
+        if self.tsp_sort and len(seqs)>2:
+            self.seqs = self.tsp_sorting(seqs)
 
         # We create three kind of SVGs
         for type in ['seq','legend','seqlegend']:
@@ -108,11 +117,8 @@ class Vis:
         y = y.sort_values(by=['count','name'], ascending=[False, True])
 
         # Assign color
-        n_color = min(self.max_n_color, y.shape[0])
-        palette = plt.get_cmap('magma', n_color+1)
-        colors = [rgb2hex(palette(x)) for x in range(n_color)]
-        y['color'] = colors[-1]
-        y.loc[y.iloc[0:n_color].index, 'color'] = colors
+        y['color'] = self.other_color
+        y.loc[y.iloc[:self.max_n_color].index, 'color'] = self.colors[:y.shape[0]]
 
         # Map potential name
         mapping = {x:x for x in y['name'].tolist()}
@@ -126,8 +132,10 @@ class Vis:
         y['ranking'] = np.arange(y.shape[0])
 
         if y.shape[0] > self.max_n_color:
-            y.loc[y.iloc[n_color-1:].index, 'name'] = '+ {} others...'.format(y.shape[0]-n_color+1)
-            y.loc[y.iloc[n_color-1:].index, 'color'] = '#eee'
+            n_other = y.shape[0]-self.max_n_color
+            if n_other>1:
+                y.loc[y.iloc[self.max_n_color:].index, 'name'] = '+ {} others...'.format(n_other)
+            y.loc[y.iloc[self.max_n_color:].index, 'color'] = self.other_color
         return y.to_dict(orient='index')
 
     def _build_svg(self, type):
@@ -189,7 +197,7 @@ class Vis:
             top += self.title is not None
 
             for i, v in enumerate(self.legend.values()):
-                if v['ranking']>=self.max_n_color:
+                if v['ranking']>=self.max_n_color+1:
                     continue
                 t = (self.square_s + self.padding)*(v['ranking']+top)
                 if type == 'seqlegend':
@@ -230,3 +238,47 @@ class Vis:
         '''
         with open(path, 'w') as f:
             f.write(self.get_svg(type))
+
+    def buildDistanceMatrix(self, seq):
+        '''
+        Build distance matrix between sequences using the normalize edit distance
+        :param seq: event logs provided as list of list
+        :return: Matrix of size (len(seqs)^2)
+        '''
+        m = np.zeros([len(seq), len(seq)])
+        for x, y in combinations(range(0,len(seq)), 2):
+            d = editdistance.eval(seq[x], seq[y]) / max([len(seq[x]), len(seq[y])])
+            m[x,y] = d
+            m[y,x] = d
+        for x in range(len(seq)):
+            m[x,x] = 0
+        return m.astype(np.float64)
+
+    def tsp_sorting(self, seqs):
+        '''
+        Order the sequence by similarty using a TSP algorithm
+        :param seqs: event logs represented as list of lists
+        :return:
+        '''
+        colored_seqs = [[self.legend[e]['color'] for i, e in enumerate(t) if i < self.width_in_block] for t in seqs]
+        dist_mat = self.buildDistanceMatrix(colored_seqs)
+        if len({''.join(x) for x in colored_seqs}) < 2:
+            return seqs
+        random2.seed(self.random_seed)
+        sys.stdout = open(os.devnull, 'w')
+        route_finder = RouteFinder(dist_mat, None, iterations=5)
+        best_distance, best_route = route_finder.solve()
+        sys.stdout = sys.__stdout__
+
+        d = []
+        for i in range(len(best_route)):
+            current = best_route[i]
+            try:
+                next = best_route[i+1]
+            except:
+                next = best_route[0]
+            d.append(dist_mat[current][next])
+        cut = np.array(d).argmax()
+        best_route = best_route[cut+1:]+best_route[:cut+1]
+
+        return [seqs[int(x)] for x in best_route]
